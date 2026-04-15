@@ -1,0 +1,281 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum Role {
+  GUEST
+  REGISTERED
+  OWNER
+  ADMIN
+}
+
+enum Visibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum AccessClassification {
+  OPEN
+  REGISTERED
+  RESTRICTED
+}
+
+enum AccessRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ProtectionStrategy {
+  MASK
+  ANONYMIZE
+  SYNTHETIC
+}
+
+enum AuditAction {
+  USER_REGISTER
+  USER_LOGIN
+  USER_LOGOUT
+  DATASET_CREATE
+  DATASET_UPDATE
+  DATASET_DELETE
+  DATASET_VIEW
+  DATASET_DOWNLOAD
+  ACCESS_REQUEST_CREATE
+  ACCESS_REQUEST_APPROVE
+  ACCESS_REQUEST_REJECT
+  VERSION_CREATE
+}
+
+// ─── USERS ───────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(REGISTERED)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedDatasets  Dataset[]
+  accessGrants   AccessGrant[]
+  accessRequests AccessRequest[]
+  downloads      Download[]
+  auditLogs      AuditLog[]
+
+  @@map("users")
+}
+
+// ─── DATASETS ────────────────────────────────────────────────────────────────
+
+model Dataset {
+  id                   String               @id @default(cuid())
+  title                String
+  description          String               @db.Text
+  tags                 String[]
+  visibility           Visibility           @default(PUBLIC)
+  accessClassification AccessClassification @default(OPEN)
+  viewCount            Int                  @default(0)
+  downloadCount        Int                  @default(0)
+  ownerId              String
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  owner            User                   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  metadataVersions MetadataVersion[]
+  dataVersions     DataVersion[]
+  columnRules      ColumnProtectionRule[]
+  rowRules         RowProtectionRule[]
+  accessGrants     AccessGrant[]
+  accessRequests   AccessRequest[]
+  downloads        Download[]
+  auditLogs        AuditLog[]
+
+  @@index([ownerId])
+  @@index([visibility])
+  @@index([accessClassification])
+  @@map("datasets")
+}
+
+// ─── VERSIONING ──────────────────────────────────────────────────────────────
+
+model MetadataVersion {
+  id                   String               @id @default(cuid())
+  datasetId            String
+  versionNumber        Int
+  title                String
+  description          String               @db.Text
+  tags                 String[]
+  visibility           Visibility
+  accessClassification AccessClassification
+  changeNote           String?
+  createdAt            DateTime             @default(now())
+  createdById          String?
+
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@unique([datasetId, versionNumber])
+  @@index([datasetId])
+  @@map("metadata_versions")
+}
+
+model DataVersion {
+  id            String   @id @default(cuid())
+  datasetId     String
+  versionNumber Int
+  fileName      String
+  fileSizeBytes Int
+  rowCount      Int
+  columnNames   String[]
+  columnStats   Json     @default("{}")
+  storageKey    String
+  changeNote    String?
+  isLatest      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  createdById   String?
+
+  dataset   Dataset   @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  rows      DataRow[]
+  downloads Download[]
+
+  @@unique([datasetId, versionNumber])
+  @@index([datasetId])
+  @@map("data_versions")
+}
+
+model DataRow {
+  id            String  @id @default(cuid())
+  dataVersionId String
+  rowIndex      Int
+  data          Json
+  isRestricted  Boolean @default(false)
+
+  dataVersion DataVersion @relation(fields: [dataVersionId], references: [id], onDelete: Cascade)
+
+  @@index([dataVersionId])
+  @@index([dataVersionId, isRestricted])
+  @@map("data_rows")
+}
+
+// ─── PROTECTION RULES ────────────────────────────────────────────────────────
+
+model ColumnProtectionRule {
+  id         String             @id @default(cuid())
+  datasetId  String
+  columnName String
+  strategy   ProtectionStrategy
+  isActive   Boolean            @default(true)
+  createdAt  DateTime           @default(now())
+
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@unique([datasetId, columnName])
+  @@map("column_protection_rules")
+}
+
+model RowProtectionRule {
+  id        String   @id @default(cuid())
+  datasetId String
+  field     String
+  operator  String
+  value     String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@map("row_protection_rules")
+}
+
+// ─── ACCESS CONTROL ──────────────────────────────────────────────────────────
+
+model AccessRequest {
+  id         String              @id @default(cuid())
+  userId     String
+  datasetId  String
+  message    String?             @db.Text
+  status     AccessRequestStatus @default(PENDING)
+  reviewNote String?
+  createdAt  DateTime            @default(now())
+  reviewedAt DateTime?
+  reviewedBy String?
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  grant   AccessGrant?
+
+  @@unique([userId, datasetId])
+  @@index([datasetId])
+  @@index([status])
+  @@map("access_requests")
+}
+
+model AccessGrant {
+  id        String    @id @default(cuid())
+  userId    String
+  datasetId String
+  requestId String?   @unique
+  grantedAt DateTime  @default(now())
+  grantedBy String?
+  expiresAt DateTime?
+  isActive  Boolean   @default(true)
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dataset Dataset       @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  request AccessRequest? @relation(fields: [requestId], references: [id])
+
+  @@unique([userId, datasetId])
+  @@index([datasetId])
+  @@map("access_grants")
+}
+
+// ─── DOWNLOADS ───────────────────────────────────────────────────────────────
+
+model Download {
+  id            String   @id @default(cuid())
+  userId        String
+  datasetId     String
+  dataVersionId String?
+  downloadedAt  DateTime @default(now())
+  ipAddress     String?
+  userAgent     String?
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dataset     Dataset      @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  dataVersion DataVersion? @relation(fields: [dataVersionId], references: [id])
+
+  @@index([userId])
+  @@index([datasetId])
+  @@index([downloadedAt])
+  @@map("downloads")
+}
+
+// ─── AUDIT LOG ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String      @id @default(cuid())
+  userId    String?
+  datasetId String?
+  action    AuditAction
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+  timestamp DateTime    @default(now())
+
+  user    User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  dataset Dataset? @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([datasetId])
+  @@index([action])
+  @@index([timestamp])
+  @@map("audit_logs")
+}
